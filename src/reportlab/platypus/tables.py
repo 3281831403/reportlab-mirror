@@ -624,7 +624,12 @@ class Table(Flowable):
 
     def _calc_height(self, availHeight, availWidth, H=None, W=None):
         H = self._argH
-        if not W: W = _calc_pc(self._argW,availWidth)   #widths array
+        if not W:
+            W = self._colWidths
+            if any(w is None or isinstance(w,strTypes) for w in W):
+                #_colWidths still holds the unresolved specification
+                #(None/'*'/'n%') so resolve it against the available width
+                W = _calc_pc(self._argW,availWidth)   #widths array
 
         hmax = lim = len(H)
         longTable = self._longTableOptimize
@@ -725,6 +730,17 @@ class Table(Flowable):
 
     def _calc(self, availWidth, availHeight):
         #if hasattr(self,'_width'): return
+
+        #if the available width changed since the last calculation any cached
+        #width dependent state is stale; restore the original column width
+        #specification and clear the cached results so the table is laid out
+        #afresh for the new width (eg a template table instance reused in
+        #frames of different widths)
+        if getattr(self,'_lastCalcAvailWidth',None)!=availWidth:
+            self._colWidths = self._argW
+            self._width_calculated_once = None
+            self._spanRects = {}
+            self._lastCalcAvailWidth = availWidth
 
         #in some cases there are unsizable things in
         #cells.  If so, apply a different algorithm
@@ -975,7 +991,10 @@ class Table(Flowable):
             for colNo, minimum in minimums.items():
                 W[colNo] = minimum * adj
         #if _debug: print(f'new widths are: {W} sum={sum(W)} availWidth={availWidth}')
-        self._argW = self._colWidths = W
+        #NB do not clobber _argW here; it must keep the original column width
+        #specification (None/'*'/'n%') so the table can be re-laid out when it
+        #is wrapped again with a different available width
+        self._colWidths = W
         return W
 
     def minWidth(self):

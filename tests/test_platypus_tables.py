@@ -1186,6 +1186,99 @@ class TablesTestCase(unittest.TestCase):
             ok = True
         self.assertEqual(ok,True,f'\n{pdffn} not built')
 
+    def test_rewrap_changed_availWidth(self):
+        '''a Table instance reused in frames of different widths must be
+        re-laid out against the current availWidth (and restore its layout
+        when the width changes back); every character box must stay inside
+        the frame the table was drawn in'''
+        from reportlab.platypus import BaseDocTemplate, PageTemplate, NextPageTemplate, PageBreak
+        from reportlab.platypus.frames import Frame
+        styleSheet = getSampleStyleSheet()
+        normal = styleSheet['Normal']
+
+        def makeTable():
+            data = [
+                ['Month', 'Runs', Paragraph('Total duration of all robot jobs in the period', normal)],
+                ['Jan', '120', Paragraph('some quite long text that must wrap inside the cell', normal)],
+                ['Feb', '98', Paragraph('another longish piece of text for wrapping tests', normal)],
+                ['Total', '218', ''],
+            ]
+            t = Table(data, colWidths=['20%', '20%', None])
+            t.setStyle(TableStyle([
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                ('SPAN', (0, 3), (1, 3)),
+            ]))
+            return t
+
+        #direct wrap checks: 523 -> 240 must re-layout like a fresh table,
+        #and 240 -> 523 must restore the original layout
+        t = makeTable()
+        w523, h523 = t.wrap(523, 1000)
+        w240, h240 = t.wrap(240, 1000)
+        f = makeTable()
+        fw240, fh240 = f.wrap(240, 1000)
+        self.assertLessEqual(w240, 240 + 1e-6,
+                f'reused table still reports width {w240} after wrap(240,...)')
+        self.assertAlmostEqual(w240, fw240, places=6)
+        self.assertAlmostEqual(h240, fh240, places=6)
+        #span rects (used for the SPAN cell borders) must follow the new widths
+        for r in t._spanRects.values():
+            if r is not None:
+                self.assertLessEqual(r[0] + r[2], 240 + 1e-6)
+        w523b, h523b = t.wrap(523, 1000)
+        self.assertAlmostEqual(w523b, w523, places=6)
+        self.assertAlmostEqual(h523b, h523, places=6)
+
+        #document level: reuse one table instance in a wide (523) frame, a
+        #narrow (240) frame and the wide frame again, then check with
+        #pdfminer that every character box lies inside its frame
+        try:
+            from pdfminer.high_level import extract_pages
+            from pdfminer.layout import LTChar, LTContainer
+        except ImportError:
+            return
+        wide = (36, 523)
+        narrow = (200, 240)     #deliberately offset from the left margin
+        pdffn = outputfile('test_platypus_tables_rewrap.pdf')
+        doc = BaseDocTemplate(pdffn,
+                pageTemplates=[
+                    PageTemplate(id='wide',
+                        frames=[Frame(wide[0], 36, wide[1], 700, id='wideF')]),
+                    PageTemplate(id='narrow',
+                        frames=[Frame(narrow[0], 36, narrow[1], 700, id='narrowF')]),
+                ])
+        #use the SAME instance in the wide frame, then the narrow one,
+        #then the wide one again
+        shared = makeTable()
+        story = [shared,
+                 NextPageTemplate('narrow'), PageBreak(), shared,
+                 NextPageTemplate('wide'), PageBreak(), shared,
+                 ]
+        doc.build(story)
+
+        def charsOf(layout):
+            for e in layout:
+                if isinstance(e, LTChar):
+                    yield e
+                elif isinstance(e, LTContainer):
+                    yield from charsOf(e)
+
+        expected = {0: wide, 1: narrow, 2: wide}
+        seen = set()
+        for pageNo, layout in enumerate(extract_pages(pdffn)):
+            if pageNo not in expected:
+                break
+            fx, fw = expected[pageNo]
+            chars = list(charsOf(layout))
+            self.assertTrue(chars, f'no text found on page {pageNo + 1}')
+            for c in chars:
+                self.assertGreaterEqual(c.x0, fx - 2,
+                        f'char {c.get_text()!r} at {c.bbox} left of frame on page {pageNo + 1}')
+                self.assertLessEqual(c.x1, fx + fw + 2,
+                        f'char {c.get_text()!r} at {c.bbox} right of frame on page {pageNo + 1}')
+            seen.add(pageNo)
+        self.assertEqual(seen, set(expected))
+
 
 def makeSuite():
     return makeSuiteForClasses(TablesTestCase)
